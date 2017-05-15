@@ -6,7 +6,7 @@ language: python
 
 python:
   - 3.5
-  - '3.6-dev'
+  - 3.6
   - 'nightly'
 
 addons:
@@ -21,7 +21,6 @@ os:
 
 matrix:
   allow_failures:
-    - python: '3.6-dev'
     - python: 'nightly'
 
 cache:
