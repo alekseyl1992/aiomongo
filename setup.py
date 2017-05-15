@@ -5,7 +5,7 @@ if sys.version_info < (3, 5, 2):
     raise RuntimeError('aiomongo requires Python 3.5.2+')
 
 
-install_requires = ['pymongo>=3.3']
+install_requires = ['pymongo<3.4']
 tests_require = install_requires + ['pytest', 'pytest-asyncio'],
 
 setup(
