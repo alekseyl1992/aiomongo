@@ -12,7 +12,6 @@ It is not yet full featured implementation and not yet battle tested, though loa
 aiomongo successfully passes it.
 Missing features are:
 
-- [ ] Bulk write API 
 - [ ] Replica set: you can only connect to single host - either single mongod instance or mongos (in front of replica set).
 - [ ] Authentication: The only method that is supported is SCRAM-SHA-1 (default for MongoDB as of version 3.2)
 

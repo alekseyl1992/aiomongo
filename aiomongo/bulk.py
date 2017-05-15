@@ -1,12 +1,13 @@
 import struct
-from typing import Iterable, Iterator, List, Tuple
+from typing import Iterable, Iterator, List, Optional, Tuple
 
 from bson import BSON, ObjectId
 from bson.codec_options import CodecOptions
 from bson.son import SON
 from io import BytesIO
-from pymongo.bulk import _COMMANDS, _Run, _merge_command
+from pymongo.bulk import _COMMANDS, _DELETE_ALL, _DELETE_ONE, _Run, _merge_command
 from pymongo.common import (validate_is_document_type,
+                            validate_is_mapping,
                             validate_ok_for_replace,
                             validate_ok_for_update)
 from pymongo.errors import BulkWriteError, InvalidOperation
@@ -264,3 +265,152 @@ class Bulk:
         buf.seek(0)
         buf.write(struct.pack('<i', length))
         return await connection.write_command(request_id, buf.getvalue())
+
+
+class BulkUpsertOperation:
+    """An interface for adding upsert operations.
+    """
+
+    def __init__(self, selector: dict, bulk: Bulk):
+        self.__selector = selector
+        self.__bulk = bulk
+
+    def update_one(self, update: dict) -> None:
+        """Update one document matching the selector.
+
+        :Parameters:
+          - `update`: the update operations to apply
+        """
+        self.__bulk.add_update(self.__selector,
+                               update, multi=False, upsert=True)
+
+    def update(self, update: dict) -> None:
+        """Update all documents matching the selector.
+
+        :Parameters:
+          - `update`: the update operations to apply
+        """
+        self.__bulk.add_update(self.__selector,
+                               update, multi=True, upsert=True)
+
+    def replace_one(self, replacement: dict) -> None:
+        """Replace one entire document matching the selector criteria.
+
+        :Parameters:
+          - `replacement`: the replacement document
+        """
+        self.__bulk.add_replace(self.__selector, replacement, upsert=True)
+
+
+class BulkWriteOperation:
+    """An interface for adding update or remove operations.
+    """
+
+    def __init__(self, selector: dict, bulk: Bulk):
+        self.__selector = selector
+        self.__bulk = bulk
+
+    def update_one(self, update: dict) -> None:
+        """Update one document matching the selector criteria.
+
+        :Parameters:
+          - `update`: the update operations to apply
+        """
+        self.__bulk.add_update(self.__selector, update, multi=False)
+
+    def update(self, update: dict) -> None:
+        """Update all documents matching the selector criteria.
+
+        :Parameters:
+          - `update`: the update operations to apply
+        """
+        self.__bulk.add_update(self.__selector, update, multi=True)
+
+    def replace_one(self, replacement: dict) -> None:
+        """Replace one entire document matching the selector criteria.
+
+        :Parameters:
+          - `replacement`: the replacement document
+        """
+        self.__bulk.add_replace(self.__selector, replacement)
+
+    def remove_one(self) -> None:
+        """Remove a single document matching the selector criteria.
+        """
+        self.__bulk.add_delete(self.__selector, _DELETE_ONE)
+
+    def remove(self) -> None:
+        """Remove all documents matching the selector criteria.
+        """
+        self.__bulk.add_delete(self.__selector, _DELETE_ALL)
+
+    def upsert(self) -> BulkUpsertOperation:
+        """Specify that all chained update operations should be
+        upserts.
+
+        :Returns:
+          - A :class:`BulkUpsertOperation` instance, used to add
+            update operations to this bulk operation.
+        """
+        return BulkUpsertOperation(self.__selector, self.__bulk)
+
+
+class BulkOperationBuilder:
+    """An interface for executing a batch of write operations.
+    """
+
+    def __init__(self, collection: 'aiomongo.Collection', ordered: bool = True,
+                 bypass_document_validation: bool = False):
+        """Initialize a new BulkOperationBuilder instance.
+
+        :Parameters:
+          - `collection`: A :class:`~pymongo.collection.Collection` instance.
+          - `ordered` (optional): If ``True`` all operations will be executed
+            serially, in the order provided, and the entire execution will
+            abort on the first error. If ``False`` operations will be executed
+            in arbitrary order (possibly in parallel on the server), reporting
+            any errors that occurred after attempting all operations. Defaults
+            to ``True``.
+          - `bypass_document_validation`: (optional) If ``True``, allows the
+            write to opt-out of document level validation. Default is
+            ``False``.
+
+        .. note:: `bypass_document_validation` requires server version
+          **>= 3.2**
+        """
+        self.__bulk = Bulk(collection, ordered, bypass_document_validation)
+
+    def find(self, selector: dict) -> BulkWriteOperation:
+        """Specify selection criteria for bulk operations.
+
+        :Parameters:
+          - `selector`: the selection criteria for update
+            and remove operations.
+
+        :Returns:
+          - A :class:`BulkWriteOperation` instance, used to add
+            update and remove operations to this bulk operation.
+        """
+        validate_is_mapping('selector', selector)
+        return BulkWriteOperation(selector, self.__bulk)
+
+    def insert(self, document: dict) -> None:
+        """Insert a single document.
+
+        :Parameters:
+          - `document`: the document to insert
+
+        .. seealso:: :ref:`writes-and-ids`
+        """
+        self.__bulk.add_insert(document)
+
+    async def execute(self, write_concern: Optional[dict] = None) -> dict:
+        """Execute all provided operations.
+
+        :Parameters:
+          - write_concern: the write concern for this bulk
+            execution.
+        """
+        if write_concern is not None:
+            validate_is_mapping('write_concern', write_concern)
+        return await self.__bulk.execute(write_concern)

@@ -9,14 +9,18 @@ from bson.codec_options import CodecOptions
 from pymongo import common, helpers, message
 from pymongo.collection import ReturnDocument, _NO_OBJ_ERROR
 from pymongo.errors import ConfigurationError, InvalidName, OperationFailure
-from pymongo.operations import IndexModel
+from pymongo.operations import _WriteOp, IndexModel
 from pymongo.read_concern import ReadConcern
 from pymongo.read_preferences import ReadPreference, _ALL_READ_PREFERENCES
-from pymongo.results import DeleteResult, InsertManyResult, InsertOneResult, UpdateResult
+from pymongo.results import (BulkWriteResult,
+                             DeleteResult,
+                             InsertManyResult,
+                             InsertOneResult,
+                             UpdateResult)
 from pymongo.write_concern import WriteConcern
 
 import aiomongo
-from .bulk import Bulk
+from .bulk import Bulk, BulkOperationBuilder
 from .command_cursor import CommandCursor
 from .cursor import Cursor
 
@@ -1436,6 +1440,113 @@ class Collection:
 
         connection = await self.database.client.get_connection()
         await connection.command(self.database.name, cmd, read_preference=ReadPreference.PRIMARY)
+
+    def initialize_unordered_bulk_op(self, bypass_document_validation: bool = False) -> BulkOperationBuilder:
+        """Initialize an unordered batch of write operations.
+
+        Operations will be performed on the server in arbitrary order,
+        possibly in parallel. All operations will be attempted.
+
+        :Parameters:
+          - `bypass_document_validation`: (optional) If ``True``, allows the
+            write to opt-out of document level validation. Default is
+            ``False``.
+
+        Returns a :class:`~pymongo.bulk.BulkOperationBuilder` instance.
+
+        See :ref:`unordered_bulk` for examples.
+
+        .. note:: `bypass_document_validation` requires server version
+          **>= 3.2**
+        """
+        return BulkOperationBuilder(self, False, bypass_document_validation)
+
+    def initialize_ordered_bulk_op(self, bypass_document_validation: bool = False) -> BulkOperationBuilder:
+        """Initialize an ordered batch of write operations.
+
+        Operations will be performed on the server serially, in the
+        order provided. If an error occurs all remaining operations
+        are aborted.
+
+        :Parameters:
+          - `bypass_document_validation`: (optional) If ``True``, allows the
+            write to opt-out of document level validation. Default is
+            ``False``.
+
+        Returns a :class:`~pymongo.bulk.BulkOperationBuilder` instance.
+
+        See :ref:`ordered_bulk` for examples.
+
+        .. note:: `bypass_document_validation` requires server version
+          **>= 3.2**
+        """
+        return BulkOperationBuilder(self, True, bypass_document_validation)
+
+    async def bulk_write(self, requests: List[_WriteOp], ordered: bool = True,
+                         bypass_document_validation: bool = False) -> BulkWriteResult:
+        """Send a batch of write operations to the server.
+
+        Requests are passed as a list of write operation instances (
+        :class:`~pymongo.operations.InsertOne`,
+        :class:`~pymongo.operations.UpdateOne`,
+        :class:`~pymongo.operations.UpdateMany`,
+        :class:`~pymongo.operations.ReplaceOne`,
+        :class:`~pymongo.operations.DeleteOne`, or
+        :class:`~pymongo.operations.DeleteMany`).
+
+          >>> for doc in db.test.find({}):
+          ...     print(doc)
+          ...
+          {u'x': 1, u'_id': ObjectId('54f62e60fba5226811f634ef')}
+          {u'x': 1, u'_id': ObjectId('54f62e60fba5226811f634f0')}
+          >>> # DeleteMany, UpdateOne, and UpdateMany are also available.
+          ...
+          >>> from pymongo import InsertOne, DeleteOne, ReplaceOne
+          >>> requests = [InsertOne({'y': 1}), DeleteOne({'x': 1}),
+          ...             ReplaceOne({'w': 1}, {'z': 1}, upsert=True)]
+          >>> result = db.test.bulk_write(requests)
+          >>> result.inserted_count
+          1
+          >>> result.deleted_count
+          1
+          >>> result.modified_count
+          0
+          >>> result.upserted_ids
+          {2: ObjectId('54f62ee28891e756a6e1abd5')}
+          >>> for doc in db.test.find({}):
+          ...     print(doc)
+          ...
+          {u'x': 1, u'_id': ObjectId('54f62e60fba5226811f634f0')}
+          {u'y': 1, u'_id': ObjectId('54f62ee2fba5226811f634f1')}
+          {u'z': 1, u'_id': ObjectId('54f62ee28891e756a6e1abd5')}
+
+        :Parameters:
+          - `requests`: A list of write operations (see examples above).
+          - `ordered` (optional): If ``True`` (the default) requests will be
+            performed on the server serially, in the order provided. If an error
+            occurs all remaining operations are aborted. If ``False`` requests
+            will be performed on the server in arbitrary order, possibly in
+            parallel, and all operations will be attempted.
+          - `bypass_document_validation`: (optional) If ``True``, allows the
+            write to opt-out of document level validation. Default is
+            ``False``.
+
+        :Returns:
+          An instance of :class:`~pymongo.results.BulkWriteResult`.
+
+        .. seealso:: :ref:`writes-and-ids`
+
+        .. note:: `bypass_document_validation` requires server version
+          **>= 3.2**
+        """
+        blk = Bulk(self, ordered, bypass_document_validation)
+        for request in requests:
+            request._add_to_bulk(blk)
+
+        bulk_api_result = await blk.execute(self.write_concern.document)
+        if bulk_api_result is not None:
+            return BulkWriteResult(bulk_api_result, True)
+        return BulkWriteResult({}, False)
 
     def __eq__(self, other: 'Collection') -> bool:
         if isinstance(other, Collection):

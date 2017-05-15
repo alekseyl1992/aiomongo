@@ -29,6 +29,13 @@ def test_db(event_loop, mongo):
 
 
 @pytest.fixture(scope='function')
+def test_coll(event_loop, test_db):
+    coll = test_db.test
+    event_loop.run_until_complete(coll.drop())
+    return coll
+
+
+@pytest.fixture(scope='function')
 def test_fs(event_loop, test_db):
     event_loop.run_until_complete(test_db.drop_collection('fs.files'))
     event_loop.run_until_complete(test_db.drop_collection('fs.chunks'))
