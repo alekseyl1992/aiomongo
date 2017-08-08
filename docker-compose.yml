@@ -1,12 +1,16 @@
- version: '3.1'
- services:
+version: '3.1'
+
+services:
    db:
-     image: mongo:3.2
+     image: mongo:3.4
+     networks:
+      - aiomongo
+
    tests:
      build:
        context: .
      image: aiomongo
-     command: py.test /opt/project/tests
+     command: py.test -s -vv /opt/project/tests
      container_name: aiomongo
      volumes:
        - .:/opt/project
@@ -16,6 +20,8 @@
      environment:
        - MONGO_HOST=db
        - PYTHONPATH=/opt/project
+     networks:
+       - aiomongo
 
    aiomongo_run:
      build:
@@ -42,3 +48,10 @@
      environment:
        - MONGO_HOST=db
        - PYTHONPATH=/opt/project
+     networks:
+       - aiomongo
+
+
+networks:
+  aiomongo:
+    driver: bridge

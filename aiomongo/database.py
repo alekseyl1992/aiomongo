@@ -196,7 +196,7 @@ class Database:
 
     async def create_collection(self, name, codec_options=None,
                                 read_preference=None, write_concern=None,
-                                read_concern=None, **kwargs):
+                                read_concern=None, **kwargs) -> Collection:
         """Create a new :class:`~aiomongo.collection.Collection` in this
         database.
 
@@ -234,6 +234,10 @@ class Database:
             :class:`~pymongo.read_concern.ReadConcern`. If ``None`` (the
             default) the :attr:`read_concern` of this :class:`Database` is
             used.
+          - `collation` (optional): An instance of
+            :class:`~pymongo.collation.Collation`. If a collation is provided,
+            it will be passed to the create collection command. This option is
+            only supported on MongoDB 3.4 and above.
           - `**kwargs` (optional): additional keyword arguments will
             be passed as options for the create collection command
 

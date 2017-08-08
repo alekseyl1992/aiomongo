@@ -18,7 +18,7 @@ Missing features are:
 # Dependencies
 
 - Unix, including Mac OS X. Wasn't tested on Windows.
-- PyMongo 3.3 or later
+- PyMongo 3.4 or later
 - Python 3.5.2 or later
 - MongoDB 3.0 or later
 
@@ -99,6 +99,11 @@ py.test ./benchmark --benchmark-json=benchmark.json --benchmark-warmup=on --benc
 ```
 
 ### Sample results (lower is better):
+
+- Python 3.6.1
+- Pymongo 3.4.0
+- MongoDB 3.4.6
+- Motor 1.1
 
 #### find_one results
 

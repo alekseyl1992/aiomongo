@@ -9,11 +9,13 @@ from bson.codec_options import CodecOptions
 from bson.son import SON
 from pymongo import common, helpers, message
 from pymongo.client_options import ClientOptions
+from pymongo.collation import Collation
 from pymongo.ismaster import IsMaster
 from pymongo.errors import ConfigurationError, ProtocolError, ConnectionFailure
 from pymongo.read_concern import DEFAULT_READ_CONCERN, ReadConcern
 from pymongo.read_preferences import ReadPreference, _ALL_READ_PREFERENCES
 from pymongo.server_type import SERVER_TYPE
+from pymongo.write_concern import WriteConcern
 
 from .auth import get_authenticator
 from .utils import IncrementalSleeper
@@ -163,7 +165,10 @@ class Connection:
                       read_preference: Optional[Union[_ALL_READ_PREFERENCES]] = None,
                       codec_options: Optional[CodecOptions] = None, check: bool = True,
                       allowable_errors: Optional[List[str]] = None, check_keys: bool = False,
-                      read_concern: ReadConcern = DEFAULT_READ_CONCERN) -> MutableMapping:
+                      read_concern: ReadConcern = DEFAULT_READ_CONCERN,
+                      write_concern: Optional[WriteConcern] = None,
+                      parse_write_concern_error: bool = False,
+                      collation: Optional[Union[Collation, dict]] = None) -> MutableMapping:
 
         if self.max_wire_version < 4 and not read_concern.ok_for_legacy:
             raise ConfigurationError(
@@ -171,6 +176,15 @@ class Connection:
                     read_concern.level, self.max_wire_version
                 )
             )
+        if not (write_concern is None or write_concern.acknowledged or
+                        collation is None):
+            raise ConfigurationError(
+                'Collation is unsupported for unacknowledged writes.')
+        if self.max_wire_version >= 5 and write_concern:
+            spec['writeConcern'] = write_concern.document
+        elif self.max_wire_version < 5 and collation is not None:
+            raise ConfigurationError(
+                'Must be connected to MongoDB 3.4+ to use a collation.')
 
         read_preference = read_preference or self.options.read_preference
         codec_options = codec_options or self.options.codec_options
@@ -187,6 +201,8 @@ class Connection:
             spec = message._maybe_add_read_preference(spec, read_preference)
         if read_concern.level:
             spec['readConcern'] = read_concern.document
+        if collation:
+            spec['collation'] = collation
 
         # See explanation in perform_operation method
         request_id = None
@@ -208,7 +224,8 @@ class Connection:
         unpacked = helpers._unpack_response(response, codec_options=codec_options)
         response_doc = unpacked['data'][0]
         if check:
-            helpers._check_command_response(response_doc, None, allowable_errors)
+            helpers._check_command_response(response_doc, None, allowable_errors,
+                                            parse_write_concern_error=parse_write_concern_error)
 
         return response_doc
 

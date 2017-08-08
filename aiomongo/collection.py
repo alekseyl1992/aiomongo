@@ -7,6 +7,7 @@ from bson.raw_bson import RawBSONDocument
 from bson.son import SON
 from bson.codec_options import CodecOptions
 from pymongo import common, helpers, message
+from pymongo.collation import Collation, validate_collation_or_none
 from pymongo.collection import ReturnDocument, _NO_OBJ_ERROR
 from pymongo.errors import ConfigurationError, InvalidName, OperationFailure
 from pymongo.operations import _WriteOp, IndexModel
@@ -77,6 +78,9 @@ class Collection:
             batch. Ignored if the connected mongod or mongos does not support
             returning aggregate results using a cursor, or `useCursor` is
             ``False``.
+          - `collation` (optional): An instance of
+            :class:`~pymongo.collation.Collation`. This option is only supported
+            on MongoDB 3.4 and above.
 
         The :meth:`aggregate` method obeys the :attr:`read_preference` of this
         :class:`Collection`. Please note that using the ``$out`` pipeline stage
@@ -104,6 +108,8 @@ class Collection:
             raise ConfigurationError('The explain option is not supported. '
                                      'Use Database.command instead.')
 
+        collation = validate_collation_or_none(kwargs.pop('collation', None))
+
         cmd = SON([('aggregate', self.name),
                    ('pipeline', pipeline)])
 
@@ -126,16 +132,17 @@ class Collection:
         if connection.max_wire_version >= 4 and 'readConcern' not in cmd:
             if pipeline and '$out' in pipeline[-1]:
                 result = await connection.command(
-                    self.database.name, cmd, self.read_preference, self.codec_options
+                    self.database.name, cmd, self.read_preference, self.codec_options,
+                    collation=collation
                 )
             else:
                 result = await connection.command(
                     self.database.name, cmd, self.read_preference, self.codec_options,
-                    read_concern=self.read_concern
+                    read_concern=self.read_concern, collation=collation
                 )
         else:
             result = await connection.command(
-                self.database.name, cmd, self.read_preference, self.codec_options
+                self.database.name, cmd, self.read_preference, self.codec_options, collation=collation
             )
 
         if 'cursor' in result:
@@ -149,12 +156,12 @@ class Collection:
 
         return CommandCursor(connection, self, cursor).batch_size(batch_size or 0)
 
-    async def _count(self, cmd: SON) -> int:
+    async def _count(self, cmd: SON, collation: Optional[Collation]=None) -> int:
         connection = await self.database.client.get_connection()
 
         result = await connection.command(
             self.database.name, cmd, self.read_preference, self.__write_response_codec_options,
-            read_concern=self.read_concern, allowable_errors=['ns missing']
+            read_concern=self.read_concern, allowable_errors=['ns missing'], collation=collation
         )
 
         if result.get('errmsg', '') == 'ns missing':
@@ -164,7 +171,7 @@ class Collection:
 
     async def count(self, filter: Optional[dict] = None, hint: Optional[Union[str, List[Tuple]]] = None,
                     limit: Optional[int] = None, skip: Optional[int] = None, max_time_ms: Optional[int] = None,
-                    comment: Union[str, dict] = None) -> int:
+                    comment: Union[str, dict] = None, collation: Optional[Collation]=None) -> int:
         cmd = SON([('count', self.name)])
         if filter is not None:
             cmd['query'] = filter
@@ -182,7 +189,9 @@ class Collection:
         if comment is not None:
             cmd['$comment'] = comment
 
-        return await self._count(cmd)
+        collation = validate_collation_or_none(collation)
+
+        return await self._count(cmd, collation=collation)
 
     async def create_index(self, keys: Union[str, List[Tuple]], **kwargs) -> str:
         """Creates an index on this collection.
@@ -258,15 +267,25 @@ class Collection:
         """
         keys = helpers._index_list(keys)
         name = kwargs.setdefault('name', helpers._gen_index_name(keys))
+        collation = validate_collation_or_none(kwargs.pop('collation', None))
 
         index_doc = helpers._index_document(keys)
         index = {'key': index_doc}
         index.update(kwargs)
 
-        cmd = SON([('createIndexes', self.name), ('indexes', [index])])
         connection = await self.database.client.get_connection()
 
-        await connection.command(self.database.name, cmd, ReadPreference.PRIMARY, self.codec_options)
+        if collation is not None:
+            if connection.max_wire_version < 5:
+                raise ConfigurationError(
+                    'Must be connected to MongoDB 3.4+ to use collations.')
+            else:
+                index['collation'] = collation
+
+        cmd = SON([('createIndexes', self.name), ('indexes', [index])])
+
+        await connection.command(self.database.name, cmd, ReadPreference.PRIMARY, self.codec_options,
+                                 write_concern=self.write_concern, parse_write_concern_error=True)
         return name
 
     async def create_indexes(self, indexes: List[IndexModel]) -> List[str]:
@@ -300,7 +319,8 @@ class Collection:
                    ('indexes', documents)])
 
         connection = await self.database.client.get_connection()
-        await connection.command(self.database.name, cmd, ReadPreference.PRIMARY, self.codec_options)
+        await connection.command(self.database.name, cmd, ReadPreference.PRIMARY, self.codec_options,
+                                 write_concern=self.write_concern, parse_write_concern_error=True)
 
         return names
 
@@ -334,13 +354,14 @@ class Collection:
             if 'query' in kwargs:
                 raise ConfigurationError('cannott pass both filter and query')
             kwargs['query'] = filter
+        collation = validate_collation_or_none(kwargs.pop('collation', None))
         cmd.update(kwargs)
 
         connection = await self.database.client.get_connection()
 
         return (await connection.command(
             self.database.name, cmd, self.read_preference, self.codec_options,
-            read_concern=self.read_concern
+            read_concern=self.read_concern, collation=collation
         ))['values']
 
     async def drop_index(self, index_or_name: Union[str, list]) -> None:
@@ -374,7 +395,8 @@ class Collection:
         connection = await self.database.client.get_connection()
         await connection.command(
             self.database.name, cmd, ReadPreference.PRIMARY, self.codec_options,
-            allowable_errors=['ns not found']
+            allowable_errors=['ns not found'], write_concern=self.write_concern,
+            parse_write_concern_error=True
         )
 
     async def drop_indexes(self) -> None:
@@ -387,7 +409,7 @@ class Collection:
 
     def find(self, filter: Optional[dict] = None, projection: Optional[Union[dict, list]] = None,
              skip: int = 0, limit: int = 0, sort: Optional[List[Tuple]] = None, modifiers: Optional[dict] = None,
-             batch_size: int = 100, no_cursor_timeout: bool = False) -> Cursor:
+             batch_size: int = 100, no_cursor_timeout: bool = False, collation: Optional[Collation] = None) -> Cursor:
         """Query the database.
 
         The `filter` argument is a prototype document that all results
@@ -444,12 +466,13 @@ class Collection:
         .. mongodoc:: find
         """
         return Cursor(
-            self, filter, projection, skip, limit, sort, modifiers, batch_size, no_cursor_timeout
+            self, filter, projection, skip, limit, sort, modifiers, batch_size, no_cursor_timeout,
+            collation
         )
 
     async def find_one(self, filter: Optional[Union[dict, Any]] = None, projection: Optional[Union[dict, list]] = None,
                        skip: int = 0, sort: Optional[List[Tuple]] = None, max_time_ms: Optional[int] = None,
-                       modifiers: Optional[dict] = None) -> Optional[MutableMapping]:
+                       modifiers: Optional[dict] = None, collation: Optional[Collation] = None) -> Optional[MutableMapping]:
         """Get a single document from the database.
 
         All arguments to :meth:`find` are also valid arguments for
@@ -472,7 +495,8 @@ class Collection:
             filter = {'_id': filter}
 
         result_cursor = self.find(
-            filter=filter, projection=projection, skip=skip, limit=1, sort=sort, modifiers=modifiers
+            filter=filter, projection=projection, skip=skip, limit=1, sort=sort, modifiers=modifiers,
+            collation=collation
         ).max_time_ms(max_time_ms)
 
         async for item in result_cursor:
@@ -520,12 +544,13 @@ class Collection:
             group['finalize'] = Code(finalize)
 
         cmd = SON([('group', group)])
+        collation = validate_collation_or_none(kwargs.pop('collation', None))
         cmd.update(kwargs)
 
         connection = await self.database.client.get_connection()
 
         return (await connection.command(
-            self.database.name, cmd, self.read_preference, self.codec_options
+            self.database.name, cmd, self.read_preference, self.codec_options, collation=collation
         ))['retval']
 
     async def insert_one(self, document: MutableMapping, bypass_document_validation: bool = False,
@@ -611,20 +636,35 @@ class Collection:
 
     async def _update(self, connection: 'aiomongo.Connection', criteria: dict, document: dict,
                       upsert: bool = False, check_keys: bool = True, multi: bool = False,
-                      ordered: bool = True, bypass_doc_val: bool = False) -> Optional[dict]:
+                      ordered: bool = True, bypass_doc_val: bool = False,
+                      collation: Optional[Collation]=None) -> Optional[dict]:
         """Internal update / replace helper."""
         common.validate_boolean('upsert', upsert)
 
+        collation = validate_collation_or_none(collation)
         concern = self.write_concern.document
 
+        update_doc = SON([('q', criteria),
+                          ('u', document),
+                          ('multi', multi),
+                          ('upsert', upsert)])
+
         acknowledged = concern.get('w') != 0
+
+        if collation is not None:
+            if connection.max_wire_version < 5:
+                raise ConfigurationError(
+                    'Must be connected to MongoDB 3.4+ to use collations.')
+            elif not acknowledged:
+                raise ConfigurationError(
+                    'Collation is unsupported for unacknowledged writes.')
+            else:
+                update_doc['collation'] = collation
+
         command = SON([('update', self.name),
                        ('ordered', ordered),
                        ('writeConcern', concern),
-                       ('updates', [SON([('q', criteria),
-                                         ('u', document),
-                                         ('multi', multi),
-                                         ('upsert', upsert)])])])
+                       ('updates', [update_doc])])
 
         if acknowledged:
 
@@ -632,7 +672,7 @@ class Collection:
                 command['bypassDocumentValidation'] = True
 
             result = await connection.command(
-                self.database.name, command, ReadPreference.PRIMARY,
+                self.database.name, command, read_preference=ReadPreference.PRIMARY,
                 codec_options=self.__write_response_codec_options
             )
             helpers._check_write_command_response([(0, result)])
@@ -660,7 +700,7 @@ class Collection:
         return result
 
     async def replace_one(self, filter: dict, replacement: dict, upsert: bool = False,
-                          bypass_document_validation: bool = False) -> UpdateResult:
+                          bypass_document_validation: bool = False, collation: Optional[Collation]=None) -> UpdateResult:
         """Replace a single document matching the filter.
 
           >>> async for doc in db.test.find({}):
@@ -715,12 +755,13 @@ class Collection:
 
         result = await self._update(
             connection, filter, replacement, upsert,
-            bypass_doc_val=bypass_document_validation
+            bypass_doc_val=bypass_document_validation,
+            collation=collation
         )
         return UpdateResult(result, self.write_concern.acknowledged)
 
     async def update_one(self, filter: dict, update: dict, upsert: bool = False,
-                         bypass_document_validation: bool = False) -> UpdateResult:
+                         bypass_document_validation: bool = False, collation: Optional[Collation]=None) -> UpdateResult:
         """Update a single document matching the filter.
 
           >>> async for doc in db.test.find():
@@ -766,12 +807,13 @@ class Collection:
         connection = await self.database.client.get_connection()
         result = await self._update(
             connection, filter, update, upsert, check_keys=False,
-            bypass_doc_val=bypass_document_validation
+            bypass_doc_val=bypass_document_validation,
+            collation=collation
         )
         return UpdateResult(result, self.write_concern.acknowledged)
 
     async def update_many(self, filter: dict, update: dict, upsert: bool = False,
-                          bypass_document_validation: bool = False) -> UpdateResult:
+                          bypass_document_validation: bool = False, collation: Optional[Collation]=None) -> UpdateResult:
         """Update one or more documents that match the filter.
 
           >>> async for doc in db.test.find():
@@ -817,28 +859,43 @@ class Collection:
         result = await self._update(
             connection, filter, update, upsert,
             check_keys=False, multi=True,
-            bypass_doc_val=bypass_document_validation
+            bypass_doc_val=bypass_document_validation,
+            collation=collation
         )
         return UpdateResult(result, self.write_concern.acknowledged)
 
     async def _delete(self, connection: 'aiomongo.Connection', criteria: dict, multi: bool,
-                      ordered: bool = True) -> Optional[dict]:
+                      ordered: bool = True, collation: Optional[Collation]=None) -> Optional[dict]:
         """Internal delete helper."""
 
         common.validate_is_mapping('filter', criteria)
         concern = self.write_concern.document
         acknowledged = concern.get('w') != 0
+
+        delete_doc = SON([('q', criteria),
+                          ('limit', int(not multi))])
+
+        collation = validate_collation_or_none(collation)
+        if collation is not None:
+            if connection.max_wire_version < 5:
+                raise ConfigurationError(
+                    'Must be connected to MongoDB 3.4+ to use collations.')
+            elif not acknowledged:
+                raise ConfigurationError(
+                    'Collation is unsupported for unacknowledged writes.')
+            else:
+                delete_doc['collation'] = collation
+
         command = SON([('delete', self.name),
                        ('ordered', ordered),
                        ('writeConcern', concern),
-                       ('deletes', [SON([('q', criteria),
-                                         ('limit', int(not multi))])])])
+                       ('deletes', [delete_doc])])
 
         if acknowledged:
             # Delete command
             result = await connection.command(
-                self.database.name, command, ReadPreference.PRIMARY,
-                self.__write_response_codec_options
+                self.database.name, command, read_preference=ReadPreference.PRIMARY,
+                codec_options=self.__write_response_codec_options
             )
             helpers._check_write_command_response([(0, result)])
             return result
@@ -851,7 +908,7 @@ class Collection:
 
         return None
 
-    async def delete_one(self, filter: dict) -> DeleteResult:
+    async def delete_one(self, filter: dict, collation: Optional[Collation]=None) -> DeleteResult:
         """Delete a single document matching the filter.
 
           >>> await db.test.count({'x': 1})
@@ -869,10 +926,10 @@ class Collection:
         """
 
         connection = await self.database.client.get_connection()
-        result = await self._delete(connection, filter, False)
+        result = await self._delete(connection, filter, False, collation=collation)
         return DeleteResult(result, self.write_concern.acknowledged)
 
-    async def delete_many(self, filter: dict) -> DeleteResult:
+    async def delete_many(self, filter: dict, collation: Optional[Collation]=None) -> DeleteResult:
         """Delete one or more documents matching the filter.
 
           >>> await db.test.count({'x': 1})
@@ -889,7 +946,7 @@ class Collection:
           - An instance of :class:`~pymongo.results.DeleteResult`.
         """
         connection = await self.database.client.get_connection()
-        result = await self._delete(connection, filter, True)
+        result = await self._delete(connection, filter, True, collation=collation)
         return DeleteResult(result, self.write_concern.acknowledged)
 
     async def reindex(self) -> None:
@@ -948,17 +1005,24 @@ class Collection:
                    ('map', map),
                    ('reduce', reduce),
                    ('out', out)])
+        collation = validate_collation_or_none(kwargs.pop('collation', None))
         cmd.update(kwargs)
 
+        inline = 'inline' in cmd['out']
         connection = await self.database.client.get_connection()
 
-        if connection.max_wire_version >= 4 and 'readConcern' not in cmd and 'inline' in cmd['out']:
+        if connection.max_wire_version >= 5 and self.write_concern and not inline:
+            cmd['writeConcern'] = self.write_concern.document
+
+        if connection.max_wire_version >= 4 and 'readConcern' not in cmd and inline:
             response = await connection.command(
                 self.database.name, cmd, ReadPreference.PRIMARY, self.codec_options,
-                read_concern=self.read_concern)
+                read_concern=self.read_concern, collation=collation)
         else:
             response = await connection.command(
-                self.database.name, cmd, ReadPreference.PRIMARY, self.codec_options)
+                self.database.name, cmd, ReadPreference.PRIMARY, self.codec_options,
+                collation=collation
+            )
 
         if full_response or not response.get('result'):
             return response
@@ -999,6 +1063,7 @@ class Collection:
                    ('map', map),
                    ('reduce', reduce),
                    ('out', {'inline': 1})])
+        collation = validate_collation_or_none(kwargs.pop('collation', None))
         cmd.update(kwargs)
 
         connection = await self.database.client.get_connection()
@@ -1006,11 +1071,12 @@ class Collection:
         if connection.max_wire_version >= 4 and 'readConcern' not in cmd:
             res = await connection.command(
                 self.database.name, cmd, self.read_preference, self.codec_options,
-                read_concern=self.read_concern
+                read_concern=self.read_concern, collation=collation
             )
         else:
             res = await connection.command(
                 self.database.name, cmd, self.read_preference, self.codec_options,
+                collation=collation
             )
 
         if full_response:
@@ -1154,6 +1220,7 @@ class Collection:
         cmd = SON([('findAndModify', self.name),
                    ('query', filter),
                    ('new', return_document)])
+        collation = validate_collation_or_none(kwargs.pop('collation', None))
         cmd.update(kwargs)
         if projection is not None:
             cmd['fields'] = helpers._fields_list_to_dict(projection, 'projection')
@@ -1171,7 +1238,7 @@ class Collection:
 
         out = await connection.command(
             self.database.name, cmd, ReadPreference.PRIMARY, self.codec_options,
-            allowable_errors=[_NO_OBJ_ERROR]
+            allowable_errors=[_NO_OBJ_ERROR], collation=collation
         )
         helpers._check_write_command_response([(0, out)])
         return out.get('value')
@@ -1432,6 +1499,9 @@ class Collection:
     async def _create(self, options: dict) -> None:
         """Sends a create command with the given options.
         """
+
+        collation = validate_collation_or_none(options.pop('collation', None))
+
         cmd = SON([('create', self.name)])
         if options:
             if 'size' in options:
@@ -1439,7 +1509,8 @@ class Collection:
             cmd.update(options)
 
         connection = await self.database.client.get_connection()
-        await connection.command(self.database.name, cmd, read_preference=ReadPreference.PRIMARY)
+        await connection.command(
+            self.database.name, cmd, read_preference=ReadPreference.PRIMARY, collation=collation)
 
     def initialize_unordered_bulk_op(self, bypass_document_validation: bool = False) -> BulkOperationBuilder:
         """Initialize an unordered batch of write operations.
