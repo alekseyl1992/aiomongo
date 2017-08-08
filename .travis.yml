@@ -5,17 +5,13 @@ services:
 
 language: python
 
+mongodb:
+  - 3.4
+
 python:
   - 3.5
   - 3.6
   - 'nightly'
-
-addons:
-  apt:
-    sources:
-    - mongodb-3.4-trusty
-    packages:
-    - mongodb-org-server
 
 os:
   - linux
