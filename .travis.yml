@@ -1,7 +1,5 @@
-sudo: required
-dist: trusty
-services:
-  - mongodb
+sudo: false
+dist: precise
 
 language: python
 
@@ -13,10 +11,9 @@ python:
 addons:
   apt:
     sources:
-    - sourceline: 'deb [arch=amd64] http://repo.mongodb.org/apt/ubuntu trusty/mongodb-org/3.4 multiverse'
-      key_url: 'https://www.mongodb.org/static/pgp/server-3.4.asc'
+    - mongodb-3.4-precise
     packages:
-    - mongodb-org-server
+    - mongodb-org
 
 os:
   - linux
@@ -28,6 +25,9 @@ matrix:
 cache:
   directories:
     - $HOME/.cache/pip
+
+before_script:
+  - mongo --version
 
 before_cache:
   - rm -f $HOME/.cache/pip/log/debug.log

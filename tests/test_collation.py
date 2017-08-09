@@ -30,7 +30,7 @@ class TestCollation:
             await test_db.test.aggregate(
                 [{'$group': {'_id': 42}}], collation=self.collation)
 
-            mock_query.assert_called()
+            assert mock_query.called
             query_args, _ = mock_query.call_args
             assert query_args[4]['collation'] == self.collation.document
 
@@ -39,14 +39,14 @@ class TestCollation:
         with mock.patch('pymongo.message.query', wraps=message.query) as mock_query:
             await test_db.test.count(collation=self.collation)
 
-            mock_query.assert_called()
+            assert mock_query.called
             query_args, _ = mock_query.call_args
             assert query_args[4]['collation'] == self.collation.document
 
         with mock.patch('pymongo.message.query', wraps=message.query) as mock_query:
             await test_db.test.find(collation=self.collation).count()
 
-            mock_query.assert_called()
+            assert mock_query.called
             query_args, _ = mock_query.call_args
             assert query_args[4]['collation'] == self.collation.document
 
@@ -56,7 +56,7 @@ class TestCollation:
 
             await test_db.test.distinct('foo', collation=self.collation)
 
-            mock_query.assert_called()
+            assert mock_query.called
             query_args, _ = mock_query.call_args
             assert query_args[4]['collation'] == self.collation.document
 
@@ -64,7 +64,7 @@ class TestCollation:
 
             await test_db.test.find(collation=self.collation).distinct('foo')
 
-            mock_query.assert_called()
+            assert mock_query.called
             query_args, _ = mock_query.call_args
             assert query_args[4]['collation'] == self.collation.document
 
@@ -76,7 +76,7 @@ class TestCollation:
             async for _ in test_db.test.find(collation=self.collation):
                 pass
 
-            mock_query.assert_called()
+            assert mock_query.called
             query_args, _ = mock_query.call_args
             assert query_args[4]['collation'] == self.collation.document
 
@@ -88,7 +88,7 @@ class TestCollation:
                 collation=self.collation
             )
 
-            mock_query.assert_called()
+            assert mock_query.called
             query_args, _ = mock_query.call_args
             assert query_args[4]['collation'] == self.collation.document
 
@@ -101,7 +101,7 @@ class TestCollation:
                 collation=self.collation
             )
 
-            mock_query.assert_called()
+            assert mock_query.called
             query_args, _ = mock_query.call_args
             assert query_args[4]['collation'] == self.collation.document
 
@@ -109,7 +109,7 @@ class TestCollation:
     async def test_delete(self, test_db):
         with mock.patch('pymongo.message.query', wraps=message.query) as mock_query:
             await test_db.test.delete_one({'foo': 42}, collation=self.collation)
-            mock_query.assert_called()
+            assert mock_query.called
             query_args, _ = mock_query.call_args
 
             for delete_query in query_args[4]['deletes']:
@@ -117,7 +117,7 @@ class TestCollation:
 
         with mock.patch('pymongo.message.query', wraps=message.query) as mock_query:
             await test_db.test.delete_many({'foo': 42}, collation=self.collation)
-            mock_query.assert_called()
+            assert mock_query.called
             query_args, _ = mock_query.call_args
 
             for delete_query in query_args[4]['deletes']:
@@ -129,7 +129,7 @@ class TestCollation:
             await test_db.test.replace_one({'foo': 42}, {'foo': 43},
                                            collation=self.collation)
 
-            mock_query.assert_called()
+            assert mock_query.called
             query_args, _ = mock_query.call_args
             for delete_query in query_args[4]['updates']:
                 assert delete_query['collation'] == self.collation.document
@@ -138,7 +138,7 @@ class TestCollation:
             await test_db.test.update_one({'foo': 42}, {'$set': {'foo': 43}},
                                           collation=self.collation)
 
-            mock_query.assert_called()
+            assert mock_query.called
             query_args, _ = mock_query.call_args
             for delete_query in query_args[4]['updates']:
                 assert delete_query['collation'] == self.collation.document
@@ -147,7 +147,7 @@ class TestCollation:
             await test_db.test.update_many({'foo': 42}, {'$set': {'foo': 43}},
                                            collation=self.collation)
 
-            mock_query.assert_called()
+            assert mock_query.called
             query_args, _ = mock_query.call_args
             for delete_query in query_args[4]['updates']:
                 assert delete_query['collation'] == self.collation.document
@@ -158,7 +158,7 @@ class TestCollation:
 
             await test_db.test.find_one_and_delete({'foo': 42}, collation=self.collation)
 
-            mock_query.assert_called()
+            assert mock_query.called
             query_args, _ = mock_query.call_args
             assert query_args[4]['collation'] == self.collation.document
 
@@ -167,7 +167,7 @@ class TestCollation:
             await test_db.test.find_one_and_update({'foo': 42}, {'$set': {'foo': 43}},
                                                    collation=self.collation)
 
-            mock_query.assert_called()
+            assert mock_query.called
             query_args, _ = mock_query.call_args
             assert query_args[4]['collation'] == self.collation.document
 
@@ -176,7 +176,7 @@ class TestCollation:
             await test_db.test.find_one_and_replace({'foo': 42}, {'foo': 43},
                                                     collation=self.collation)
 
-            mock_query.assert_called()
+            assert mock_query.called
             query_args, _ = mock_query.call_args
             assert query_args[4]['collation'] == self.collation.document
 
@@ -201,7 +201,7 @@ class TestCollation:
                 '$set': {'foo': 42}})
             await bulk.execute()
 
-            mock_query.assert_called()
+            assert mock_query.called
             query_args, _ = mock_query.call_args
 
             for op in query_args[3]:
@@ -221,7 +221,7 @@ class TestCollation:
 
             assert len(items) > 0
 
-            mock_query.assert_called()
+            assert mock_query.called
             query_args, _ = mock_query.call_args
             assert query_args[4]['collation'] == self.collation.document
 
