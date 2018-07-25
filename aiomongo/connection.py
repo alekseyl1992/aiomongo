@@ -44,6 +44,7 @@ class Connection:
         self.max_write_batch_size = common.MAX_WRITE_BATCH_SIZE
         self.options = options
         self.slave_ok = False
+        self._is_connecting = False
 
         self.__connected = asyncio.Event(loop=loop)
         self.__disconnected = asyncio.Event(loop=loop)
@@ -59,14 +60,15 @@ class Connection:
         return conn
 
     async def connect(self) -> None:
+        self._is_connecting = True
         if self.host.startswith('/'):
-            self.reader, self.writer = await asyncio.open_unix_connection(
+            self.reader, self.writer = await asyncio.wait_for(asyncio.open_unix_connection(
                 path=self.host, loop=self.loop
-            )
+            ), timeout=self.options.pool_options.connect_timeout, loop=self.loop)
         else:
-            self.reader, self.writer = await asyncio.open_connection(
+            self.reader, self.writer = await asyncio.wait_for(asyncio.open_connection(
                 host=self.host, port=self.port, loop=self.loop
-            )
+            ), timeout=self.options.pool_options.connect_timeout, loop=self.loop)
 
         sock = self.writer.transport.get_extra_info('socket')
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, int(self.options.pool_options.socket_keepalive))
@@ -78,19 +80,17 @@ class Connection:
         logger.debug('Established connection to {}'.format(endpoint))
         self.read_loop_task = asyncio.ensure_future(self.read_loop(), loop=self.loop)
 
-        ismaster = IsMaster(await self.command(
-            'admin', SON([('ismaster', 1)]), ReadPreference.PRIMARY, DEFAULT_CODEC_OPTIONS
-        ))
+        is_master = await self.is_master()
 
-        self.is_mongos = ismaster.server_type == SERVER_TYPE.Mongos
-        self.max_wire_version = ismaster.max_wire_version
-        if ismaster.max_bson_size:
-            self.max_bson_size = ismaster.max_bson_size
-        if ismaster.max_message_size:
-            self.max_message_size = ismaster.max_message_size
-        if ismaster.max_write_batch_size:
-            self.max_write_batch_size = ismaster.max_write_batch_size
-        self.is_writable = ismaster.is_writable
+        self.is_mongos = is_master.server_type == SERVER_TYPE.Mongos
+        self.max_wire_version = is_master.max_wire_version
+        if is_master.max_bson_size:
+            self.max_bson_size = is_master.max_bson_size
+        if is_master.max_message_size:
+            self.max_message_size = is_master.max_message_size
+        if is_master.max_write_batch_size:
+            self.max_write_batch_size = is_master.max_write_batch_size
+        self.is_writable = is_master.is_writable
 
         self.slave_ok = not self.is_mongos and self.options.read_preference != ReadPreference.PRIMARY
 
@@ -98,16 +98,26 @@ class Connection:
             await self._authenticate()
 
         # Notify waiters that connection has been established
+        self._is_connecting = False
         self.__connected.set()
+
+    async def is_master(self) -> IsMaster:
+        is_master = IsMaster(await self.command(
+            'admin', SON([('ismaster', 1)]), ReadPreference.PRIMARY, DEFAULT_CODEC_OPTIONS
+        ))
+
+        return is_master
 
     async def reconnect(self) -> None:
         while True:
             try:
                 await self.connect()
             except asyncio.CancelledError:
+                self._is_connecting = False
                 raise
             except Exception as e:
                 logger.error('Failed to reconnect: {}'.format(str(e)))
+                self._is_connecting = False
                 await self.__sleeper.sleep()
             else:
                 self.__sleeper.reset()
@@ -177,7 +187,7 @@ class Connection:
                 )
             )
         if not (write_concern is None or write_concern.acknowledged or
-                        collation is None):
+                collation is None):
             raise ConfigurationError(
                 'Collation is unsupported for unacknowledged writes.')
         if self.max_wire_version >= 5 and write_concern:
@@ -263,10 +273,15 @@ class Connection:
                 for ft in self.__request_futures.values():
                     ft.set_exception(connection_error)
                 self.__request_futures = {}
-                try:
-                    await self.reconnect()
-                except asyncio.CancelledError:
-                    self._shut_down()
+
+                if not self._is_connecting:
+                    try:
+                        await self.reconnect()
+                    except asyncio.CancelledError:
+                        self._shut_down()
+                else:
+                    logger.debug('skipping reconnect')
+
                 return
 
     def _shut_down(self) -> None:
@@ -299,6 +314,8 @@ class Connection:
         await self.__connected.wait()
 
     def close(self, error: Optional[Exception] = None) -> None:
+        self.is_writable = False
+
         if error is not None:
             logger.error(str(error))
         elif self.read_loop_task is not None:

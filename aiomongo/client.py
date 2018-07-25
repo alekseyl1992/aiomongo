@@ -1,5 +1,7 @@
 import asyncio
-from typing import Optional, Union
+import logging
+from asyncio import CancelledError
+from typing import Optional, Union, List
 
 from bson.codec_options import CodecOptions
 from pymongo.client_options import ClientOptions
@@ -13,28 +15,71 @@ from .connection import Connection
 from .database import Database
 
 
+logger = logging.getLogger('aiomongo.client')
+
+
 class AioMongoClient:
 
     _index = 0
 
-    def __init__(self, uri: str, loop: asyncio.AbstractEventLoop):
+    def __init__(self, uri: str, loop: asyncio.AbstractEventLoop,
+                 check_primary_period: int = 1):
+
+        self._check_primary_period = check_primary_period
+
         uri_info = parse_uri(uri=uri)
-        assert len(uri_info['nodelist']) == 1, 'Can only connect to single node - either mongod or mongos'
-        self.host = uri_info['nodelist'][0][0]
-        self.port = uri_info['nodelist'][0][1]
+
+        self.nodes = [{
+            'host': node[0],
+            'port': node[1],
+        } for node in uri_info['nodelist']]
+
         self.options = ClientOptions(
             uri_info['username'], uri_info['password'], uri_info['database'], uri_info['options']
         )
+
         self.loop = loop
-        self._pool = []
+
+        self._pools = {}
+
+        self._primary_pool = None
+
         self.__default_database_name = uri_info['database']
 
+        self._check_primary_tasks = []
+
     async def connect(self) -> None:
-        self._pool = await asyncio.gather(
-            *[Connection.create(
-                self.loop, self.host, self.port, self.options
-            ) for _ in range(self.options.pool_options.max_pool_size)]
-        )
+        exception = None
+
+        for node in self.nodes:
+            host = node['host']
+            port = node['port']
+
+            try:
+                pool = await asyncio.gather(
+                    *[Connection.create(
+                        self.loop, host, port, self.options
+                    ) for _ in range(self.options.pool_options.max_pool_size)]
+                )
+
+                pool_name = f'{host}:{port}'
+                self._pools[pool_name] = pool
+            except Exception as e:
+                logger.exception(f'Unable to connect to {node}', exc_info=True)
+                exception = e
+
+        if not self._pools:
+            raise exception
+
+        for host, pool in self._pools.items():
+            connection: Connection = pool[self._index]
+            if connection.is_writable:
+                self.set_primary(host, pool)
+
+        # primary may change in the future
+        for host, pool in self._pools.items():
+            task = asyncio.ensure_future(self.check_primary_coro(host, pool), loop=self.loop)
+            self._check_primary_tasks.append(task)
 
     def __getitem__(self, item: str) -> Database:
         return Database(self, item)
@@ -42,15 +87,59 @@ class AioMongoClient:
     def __getattr__(self, item: str) -> Database:
         return self.__getitem__(item)
 
+    async def check_primary(self, host: str, pool: List[str]):
+        logger.debug(f'Check primary: {host}')
+
+        connection: Connection = pool[self._index]
+
+        try:
+            is_master = await asyncio.wait_for(connection.is_master(),
+                                               timeout=self.options.pool_options.connect_timeout,
+                                               loop=self.loop)
+
+            if is_master.is_writable:
+                if pool != self._primary_pool:
+                    self.set_primary(host, pool)
+                    return
+
+        except CancelledError:
+            raise
+        except Exception:
+            logger.exception('Error in check_primary', exc_info=True)
+
+    async def check_primary_coro(self, host: str, pool: List[str]):
+        while True:
+            try:
+                await asyncio.sleep(self._check_primary_period)
+                await self.check_primary(host, pool)
+            except CancelledError:
+                logger.debug(f'Check primary coro cancelled for: {host}')
+                return
+            except Exception:
+                logger.exception('Error in check_primary_coro', exc_info=True)
+                continue
+
+    def set_primary(self, primary_host: str, primary_pool: list):
+        logger.info(f'MongoDB primary node: {primary_host}')
+
+        self._primary_pool = primary_pool
+
+        for host, pool in self._pools.items():
+            for connection in pool:
+                connection.is_writable = host == primary_host
+
     async def get_connection(self) -> Connection:
-        """ Gets connection from pool and waits for it to be ready
+        """ Gets connection from primary pool and waits for it to be ready
             to work.
         """
-        # Get the next protocol available for communication in the pool.
-        connection = self._pool[self._index]
-        self._index = (self._index + 1) % len(self._pool)
 
-        await connection.wait_connected()
+        # Get the next protocol available for communication in the pool.
+        connection = self._primary_pool[self._index]
+        self._index = (self._index + 1) % len(self._primary_pool)
+
+        await asyncio.wait_for(connection.wait_connected(),
+                               timeout=self.options.pool_options.connect_timeout,
+                               loop=self.loop)
 
         return connection
 
@@ -141,8 +230,15 @@ class AioMongoClient:
         return await self.admin.command('buildinfo')
 
     def close(self) -> None:
-        for conn in self._pool:
-            conn.close()
+        for task in self._check_primary_tasks:
+            task.cancel()
+
+        self._check_primary_tasks = []
+
+        for host, pool in self._pools.items():
+            for conn in pool:
+                conn.close()
 
     async def wait_closed(self) -> None:
-        await asyncio.wait([conn.wait_closed() for conn in self._pool], loop=self.loop)
+        for host, pool in self._pools.items():
+            await asyncio.wait([conn.wait_closed() for conn in pool], loop=self.loop)
