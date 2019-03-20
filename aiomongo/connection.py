@@ -280,7 +280,7 @@ class Connection:
                     except asyncio.CancelledError:
                         self._shut_down()
                 else:
-                    logger.debug('skipping reconnect')
+                    logger.debug('Skipping reconnect since _is_connecting is already True')
 
                 return
 

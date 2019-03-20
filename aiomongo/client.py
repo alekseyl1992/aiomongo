@@ -93,6 +93,10 @@ class AioMongoClient:
         connection: Connection = pool[self._index]
 
         try:
+            await asyncio.wait_for(connection.wait_connected(),
+                                   timeout=self.options.pool_options.connect_timeout,
+                                   loop=self.loop)
+
             is_master = await asyncio.wait_for(connection.is_master(),
                                                timeout=self.options.pool_options.connect_timeout,
                                                loop=self.loop)
