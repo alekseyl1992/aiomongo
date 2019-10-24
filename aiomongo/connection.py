@@ -291,7 +291,9 @@ class Connection:
     def _shut_down(self) -> None:
         connection_error = ConnectionFailure('Shutting down.')
         for ft in self.__request_futures.values():
-            ft.set_exception(connection_error)
+            if not ft.cancelled():
+                ft.set_exception(connection_error)
+
         self.__disconnected.set()
 
     async def _read_loop_step(self) -> None:
@@ -330,6 +332,7 @@ class Connection:
 
         if self.read_loop_task is not None:
             self.read_loop_task.cancel()
+            self.read_loop_task = None
 
         if self.writer is not None:
             self.writer.close()
