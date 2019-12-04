@@ -35,7 +35,7 @@ class Connection:
         self.loop = loop
         self.reader = None
         self.writer = None
-        self.read_loop_task: asyncio.Task = None
+        self.read_loop_task = None
         self.is_mongos = False
         self.is_writable = False
         self.max_bson_size = common.MAX_BSON_SIZE
@@ -78,9 +78,7 @@ class Connection:
         else:
             endpoint = '{}:{}'.format(self.host, self.port)
         logger.debug('Established connection to {}'.format(endpoint))
-
         self.read_loop_task = asyncio.ensure_future(self.read_loop(), loop=self.loop)
-        self.read_loop_task.add_done_callback(self._on_read_loop_task_done)
 
         is_master = await self.is_master()
 
@@ -267,26 +265,24 @@ class Connection:
                 await self._read_loop_step()
             except asyncio.CancelledError:
                 self._shut_down()
-                raise
+                return
             except Exception as e:
                 self.__connected.clear()
                 connection_error = ConnectionFailure('Connection was lost due to: {}'.format(str(e)))
                 self.close(error=connection_error)
-
                 for ft in self.__request_futures.values():
                     ft.set_exception(connection_error)
-
                 self.__request_futures = {}
 
-                return
+                if not self._is_connecting:
+                    try:
+                        await self.reconnect()
+                    except asyncio.CancelledError:
+                        self._shut_down()
+                else:
+                    logger.debug('Skipping reconnect since _is_connecting is already True')
 
-    def _on_read_loop_task_done(self, t: asyncio.Task):
-        try:
-            t.exception()
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            logger.exception('read_loop_task exited with error', exc_info=True)
+                return
 
     def _shut_down(self) -> None:
         connection_error = ConnectionFailure('Shutting down.')
@@ -317,11 +313,6 @@ class Connection:
 
     async def wait_connected(self) -> None:
         """Returns when connection is ready to be used"""
-
-        if not self._is_connecting and not self.__connected.is_set():
-            logger.warning('Reconnecting...')
-            await self.reconnect()
-
         await self.__connected.wait()
 
     def close(self, error: Optional[Exception] = None) -> None:
@@ -329,8 +320,7 @@ class Connection:
 
         if error is not None:
             logger.error(str(error))
-
-        if self.read_loop_task is not None:
+        elif self.read_loop_task is not None:
             self.read_loop_task.cancel()
             self.read_loop_task = None
 
