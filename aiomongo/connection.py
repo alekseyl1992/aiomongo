@@ -36,6 +36,7 @@ class Connection:
         self.reader = None
         self.writer = None
         self.read_loop_task = None
+        self.reconnect_task = None
         self.is_mongos = False
         self.is_writable = False
         self.max_bson_size = common.MAX_BSON_SIZE
@@ -44,7 +45,6 @@ class Connection:
         self.max_write_batch_size = common.MAX_WRITE_BATCH_SIZE
         self.options = options
         self.slave_ok = False
-        self._is_connecting = False
 
         self.__connected = asyncio.Event(loop=loop)
         self.__disconnected = asyncio.Event(loop=loop)
@@ -60,7 +60,6 @@ class Connection:
         return conn
 
     async def connect(self) -> None:
-        self._is_connecting = True
         if self.host.startswith('/'):
             self.reader, self.writer = await asyncio.wait_for(asyncio.open_unix_connection(
                 path=self.host, loop=self.loop
@@ -79,8 +78,11 @@ class Connection:
             endpoint = '{}:{}'.format(self.host, self.port)
         logger.debug('Established connection to {}'.format(endpoint))
         self.read_loop_task = asyncio.ensure_future(self.read_loop(), loop=self.loop)
+        self.read_loop_task.add_done_callback(self._on_read_loop_task_done)
 
-        is_master = await self.is_master()
+        is_master = await self.is_master(
+            ignore_connected=True,  # allow the request whilst __connected is not set yet
+        )
 
         self.is_mongos = is_master.server_type == SERVER_TYPE.Mongos
         self.max_wire_version = is_master.max_wire_version
@@ -98,28 +100,47 @@ class Connection:
             await self._authenticate()
 
         # Notify waiters that connection has been established
-        self._is_connecting = False
         self.__connected.set()
 
-    async def is_master(self) -> IsMaster:
+    def _on_read_loop_task_done(self, t: asyncio.Task):
+        try:
+            t.exception()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception('read_loop() exited with error', exc_info=True)
+
+    def _on_reconnect_task_done(self, t: asyncio.Task):
+        try:
+            t.exception()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            logger.exception('reconnect() exited with error', exc_info=True)
+        finally:
+            # allow new reconnect tasks to start
+            self.reconnect_task = None
+
+    async def is_master(self, ignore_connected: bool = False) -> IsMaster:
         is_master = IsMaster(await self.command(
-            'admin', SON([('ismaster', 1)]), ReadPreference.PRIMARY, DEFAULT_CODEC_OPTIONS
+            'admin', SON([('ismaster', 1)]), ReadPreference.PRIMARY, DEFAULT_CODEC_OPTIONS,
+            ignore_connected=ignore_connected,
         ))
 
         return is_master
 
     async def reconnect(self) -> None:
+        logger.warning('Reconnecting...')
         while True:
             try:
                 await self.connect()
             except asyncio.CancelledError:
-                self._is_connecting = False
                 raise
             except Exception as e:
                 logger.error('Failed to reconnect: {}'.format(str(e)))
-                self._is_connecting = False
                 await self.__sleeper.sleep()
             else:
+                logger.warning('Reconnect succeeded')
                 self.__sleeper.reset()
                 return
 
@@ -135,6 +156,8 @@ class Connection:
         return self.__request_id
 
     async def perform_operation(self, operation) -> bytes:
+        await self.wait_connected()
+
         request_id = None
 
         # Because pymongo uses rand() function internally to generate request_id
@@ -153,6 +176,8 @@ class Connection:
         return await response_future
 
     async def write_command(self, request_id: int, msg: bytes) -> dict:
+        await self.wait_connected()
+
         response_future = asyncio.Future(loop=self.loop)
         self.__request_futures[request_id] = response_future
 
@@ -178,7 +203,8 @@ class Connection:
                       read_concern: ReadConcern = DEFAULT_READ_CONCERN,
                       write_concern: Optional[WriteConcern] = None,
                       parse_write_concern_error: bool = False,
-                      collation: Optional[Union[Collation, dict]] = None) -> MutableMapping:
+                      collation: Optional[Union[Collation, dict]] = None,
+                      ignore_connected: bool = False) -> MutableMapping:
 
         if self.max_wire_version < 4 and not read_concern.ok_for_legacy:
             raise ConfigurationError(
@@ -223,6 +249,9 @@ class Connection:
         if size > self.max_bson_size + message._COMMAND_OVERHEAD:
             message._raise_document_too_large(
                 name, size, self.max_bson_size + message._COMMAND_OVERHEAD)
+
+        if not ignore_connected:
+            await self.wait_connected()
 
         response_future = asyncio.Future()
         self.__request_futures[request_id] = response_future
@@ -274,13 +303,11 @@ class Connection:
                     ft.set_exception(connection_error)
                 self.__request_futures = {}
 
-                if not self._is_connecting:
-                    try:
-                        await self.reconnect()
-                    except asyncio.CancelledError:
-                        self._shut_down()
+                if self.reconnect_task is None:
+                    self.reconnect_task = asyncio.ensure_future(self.reconnect(), loop=self.loop)
+                    self.reconnect_task.add_done_callback(self._on_reconnect_task_done)
                 else:
-                    logger.debug('Skipping reconnect since _is_connecting is already True')
+                    logger.warning('Reconnect already in progress')
 
                 return
 
@@ -319,10 +346,18 @@ class Connection:
         self.is_writable = False
 
         if error is not None:
+            # we are reconnecting
             logger.error(str(error))
-        elif self.read_loop_task is not None:
-            self.read_loop_task.cancel()
-            self.read_loop_task = None
+        else:
+            # we are closing
+
+            if self.read_loop_task is not None:
+                self.read_loop_task.cancel()
+                self.read_loop_task = None
+
+            if self.reconnect_task is not None:
+                self.reconnect_task.cancel()
+                self.reconnect_task = None
 
         if self.writer is not None:
             self.writer.close()
