@@ -32,7 +32,7 @@ async def _authenticate_scram_sha1(credentials: MongoCredential, connection: 'ai
                ('mechanism', 'SCRAM-SHA-1'),
                ('payload', Binary(b'n,,' + first_bare)),
                ('autoAuthorize', 1)])
-    res = await connection.command(source, cmd)
+    res = await connection.command(source, cmd, ignore_connected=True)
 
     server_first = res['payload']
     parsed = _parse_scram_response(server_first)
@@ -60,7 +60,7 @@ async def _authenticate_scram_sha1(credentials: MongoCredential, connection: 'ai
     cmd = SON([('saslContinue', 1),
                ('conversationId', res['conversationId']),
                ('payload', Binary(client_final))])
-    res = await connection.command(source, cmd)
+    res = await connection.command(source, cmd, ignore_connected=True)
 
     parsed = _parse_scram_response(res['payload'])
     if not compare_digest(parsed[b'v'], server_sig):
@@ -72,7 +72,7 @@ async def _authenticate_scram_sha1(credentials: MongoCredential, connection: 'ai
         cmd = SON([('saslContinue', 1),
                    ('conversationId', res['conversationId']),
                    ('payload', Binary(b''))])
-        res = await connection.command(source, cmd)
+        res = await connection.command(source, cmd, ignore_connected=True)
         if not res['done']:
             raise OperationFailure('SASL conversation failed to complete.')
 
