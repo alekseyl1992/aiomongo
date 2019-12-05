@@ -11,7 +11,7 @@ from pymongo import common, helpers, message
 from pymongo.client_options import ClientOptions
 from pymongo.collation import Collation
 from pymongo.ismaster import IsMaster
-from pymongo.errors import ConfigurationError, ProtocolError, ConnectionFailure
+from pymongo.errors import ConfigurationError, ProtocolError, ConnectionFailure, AutoReconnect
 from pymongo.read_concern import DEFAULT_READ_CONCERN, ReadConcern
 from pymongo.read_preferences import ReadPreference, _ALL_READ_PREFERENCES
 from pymongo.server_type import SERVER_TYPE
@@ -156,7 +156,7 @@ class Connection:
         return self.__request_id
 
     async def perform_operation(self, operation) -> bytes:
-        await self.wait_connected()
+        self._check_connected()
 
         request_id = None
 
@@ -176,7 +176,7 @@ class Connection:
         return await response_future
 
     async def write_command(self, request_id: int, msg: bytes) -> dict:
-        await self.wait_connected()
+        self._check_connected()
 
         response_future = asyncio.Future(loop=self.loop)
         self.__request_futures[request_id] = response_future
@@ -251,7 +251,7 @@ class Connection:
                 name, size, self.max_bson_size + message._COMMAND_OVERHEAD)
 
         if not ignore_connected:
-            await self.wait_connected()
+            self._check_connected()
 
         response_future = asyncio.Future()
         self.__request_futures[request_id] = response_future
@@ -273,6 +273,10 @@ class Connection:
             self.options.credentials.mechanism
         )
         await authenticator(self.options.credentials, self)
+
+    def _check_connected(self):
+        if not self.__connected.is_set():
+            raise AutoReconnect('Not connected')
 
     @staticmethod
     def _split_message(msg: tuple) -> tuple:

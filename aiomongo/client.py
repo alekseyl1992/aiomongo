@@ -87,7 +87,7 @@ class AioMongoClient:
     def __getattr__(self, item: str) -> Database:
         return self.__getitem__(item)
 
-    async def check_primary(self, host: str, pool: List[str]):
+    async def check_primary(self, host: str, pool: List[Connection]):
         logger.debug(f'Check primary: {host}')
 
         connection: Connection = pool[self._index]
@@ -111,7 +111,7 @@ class AioMongoClient:
         except Exception:
             logger.exception('Error in check_primary', exc_info=True)
 
-    async def check_primary_coro(self, host: str, pool: List[str]):
+    async def check_primary_coro(self, host: str, pool: List[Connection]):
         while True:
             try:
                 await asyncio.sleep(self._check_primary_period)
@@ -123,7 +123,7 @@ class AioMongoClient:
                 logger.exception('Error in check_primary_coro', exc_info=True)
                 continue
 
-    def set_primary(self, primary_host: str, primary_pool: list):
+    def set_primary(self, primary_host: str, primary_pool: List[Connection]):
         logger.info(f'MongoDB primary node: {primary_host}')
 
         self._primary_pool = primary_pool
