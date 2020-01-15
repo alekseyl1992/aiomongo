@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from asyncio import CancelledError
-from typing import Optional, Union, List
+from typing import Optional, Union
 
 from bson.codec_options import CodecOptions
 from pymongo.client_options import ClientOptions
@@ -13,15 +13,12 @@ from pymongo.write_concern import WriteConcern
 
 from .connection import Connection
 from .database import Database
-
+from .pool import Pool
 
 logger = logging.getLogger('aiomongo.client')
 
 
 class AioMongoClient:
-
-    _index = 0
-
     def __init__(self, uri: str, loop: asyncio.AbstractEventLoop,
                  check_primary_period: int = 1):
 
@@ -55,26 +52,21 @@ class AioMongoClient:
             host = node['host']
             port = node['port']
 
-            try:
-                pool = await asyncio.gather(
-                    *[Connection.create(
-                        self.loop, host, port, self.options
-                    ) for _ in range(self.options.pool_options.max_pool_size)]
-                )
-
-                pool_name = f'{host}:{port}'
-                self._pools[pool_name] = pool
-            except Exception as e:
-                logger.exception(f'Unable to connect to {node}', exc_info=True)
-                exception = e
-
-        if not self._pools:
-            raise exception
-
-        for host, pool in self._pools.items():
-            connection: Connection = pool[self._index]
-            if connection.is_writable:
+            pool_name = f'{host}:{port}'
+            pool = Pool(
+                host=host,
+                port=port,
+                loop=self.loop,
+                options=self.options,
+            )
+            self._pools[pool_name] = pool
+            connected, exception, is_writable = await pool.connect()
+            if is_writable:
                 self.set_primary(host, pool)
+
+        if self._primary_pool is None:
+            self.close()
+            raise exception
 
         # primary may change in the future
         for host, pool in self._pools.items():
@@ -87,16 +79,19 @@ class AioMongoClient:
     def __getattr__(self, item: str) -> Database:
         return self.__getitem__(item)
 
-    async def check_primary(self, host: str, pool: List[Connection]):
+    async def check_primary(self, host: str, pool: Pool):
         logger.debug(f'Check primary: {host}')
 
-        connection: Connection = pool[self._index]
+        if not pool.connected:
+            logger.warning(f'Connecting pool to {host}')
+            connected, exception, is_writable = await pool.connect()
+            if not connected:
+                logger.warning(f'Failed connecting pool to {host}')
+                return
+
+        connection: Connection = await pool.get_connection()
 
         try:
-            await asyncio.wait_for(connection.wait_connected(),
-                                   timeout=self.options.pool_options.connect_timeout,
-                                   loop=self.loop)
-
             is_master = await asyncio.wait_for(connection.is_master(),
                                                timeout=self.options.pool_options.connect_timeout,
                                                loop=self.loop)
@@ -111,7 +106,7 @@ class AioMongoClient:
         except Exception:
             logger.exception('Error in check_primary', exc_info=True)
 
-    async def check_primary_coro(self, host: str, pool: List[Connection]):
+    async def check_primary_coro(self, host: str, pool: Pool):
         while True:
             try:
                 await asyncio.sleep(self._check_primary_period)
@@ -123,28 +118,19 @@ class AioMongoClient:
                 logger.exception('Error in check_primary_coro', exc_info=True)
                 continue
 
-    def set_primary(self, primary_host: str, primary_pool: List[Connection]):
+    def set_primary(self, primary_host: str, primary_pool: Pool):
         logger.info(f'MongoDB primary node: {primary_host}')
 
         self._primary_pool = primary_pool
 
         for host, pool in self._pools.items():
-            for connection in pool:
-                connection.is_writable = host == primary_host
+            pool.set_writable(is_writable=host == primary_host)
 
     async def get_connection(self) -> Connection:
         """ Gets connection from primary pool and waits for it to be ready
             to work.
         """
-
-        # Get the next protocol available for communication in the pool.
-        connection = self._primary_pool[self._index]
-        self._index = (self._index + 1) % len(self._primary_pool)
-
-        await asyncio.wait_for(connection.wait_connected(),
-                               timeout=self.options.pool_options.connect_timeout,
-                               loop=self.loop)
-
+        connection = await self._primary_pool.get_connection()
         return connection
 
     def get_database(self, name: str, codec_options: Optional[CodecOptions] = None,
@@ -240,9 +226,8 @@ class AioMongoClient:
         self._check_primary_tasks = []
 
         for host, pool in self._pools.items():
-            for conn in pool:
-                conn.close()
+            pool.close()
 
     async def wait_closed(self) -> None:
         for host, pool in self._pools.items():
-            await asyncio.wait([conn.wait_closed() for conn in pool], loop=self.loop)
+            await pool.wait_closed()

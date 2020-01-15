@@ -2,6 +2,7 @@ import asyncio
 import logging
 import socket
 import struct
+from contextlib import suppress
 from typing import List, MutableMapping, Optional, Union
 
 from bson import DEFAULT_CODEC_OPTIONS
@@ -56,7 +57,14 @@ class Connection:
     async def create(cls, loop: asyncio.AbstractEventLoop, host: str, port: int,
                      options: ClientOptions) -> 'Connection':
         conn = cls(loop, host, port, options)
-        await conn.connect()
+
+        try:
+            await conn.connect()
+        except Exception:
+            with suppress(Exception):
+                conn.close()
+            raise
+
         return conn
 
     async def connect(self) -> None:
@@ -104,7 +112,9 @@ class Connection:
 
     def _on_read_loop_task_done(self, t: asyncio.Task):
         try:
-            t.exception()
+            e = t.exception()
+            if e is not None:
+                raise e
         except asyncio.CancelledError:
             pass
         except Exception:
@@ -112,7 +122,9 @@ class Connection:
 
     def _on_reconnect_task_done(self, t: asyncio.Task):
         try:
-            t.exception()
+            e = t.exception()
+            if e is not None:
+                raise e
         except asyncio.CancelledError:
             pass
         except Exception:
@@ -173,7 +185,11 @@ class Connection:
 
         self.send_message(data)
 
-        return await response_future
+        try:
+            return await response_future
+        except asyncio.CancelledError:
+            del self.__request_futures[request_id]
+            raise
 
     async def write_command(self, request_id: int, msg: bytes) -> dict:
         self._check_connected()
@@ -183,7 +199,12 @@ class Connection:
 
         self.send_message(msg)
 
-        response_data = await response_future
+        try:
+            response_data = await response_future
+        except asyncio.CancelledError:
+            del self.__request_futures[request_id]
+            raise
+
         response = helpers._unpack_response(response_data)
         assert response['number_returned'] == 1
 
@@ -258,7 +279,11 @@ class Connection:
 
         self.send_message(msg)
 
-        response = await response_future
+        try:
+            response = await response_future
+        except asyncio.CancelledError:
+            del self.__request_futures[request_id]
+            raise
 
         unpacked = helpers._unpack_response(response, codec_options=codec_options)
         response_doc = unpacked['data'][0]
@@ -304,7 +329,8 @@ class Connection:
                 connection_error = ConnectionFailure('Connection was lost due to: {}'.format(str(e)))
                 self.close(error=connection_error)
                 for ft in self.__request_futures.values():
-                    ft.set_exception(connection_error)
+                    if not ft.done():
+                        ft.set_exception(connection_error)
                 self.__request_futures = {}
 
                 if self.reconnect_task is None:
@@ -318,7 +344,7 @@ class Connection:
     def _shut_down(self) -> None:
         connection_error = ConnectionFailure('Shutting down.')
         for ft in self.__request_futures.values():
-            if not ft.cancelled():
+            if not ft.done():
                 ft.set_exception(connection_error)
 
         self.__disconnected.set()
@@ -332,15 +358,16 @@ class Connection:
 
         response_id, = struct.unpack('<i', header[8:12])
 
-        if response_id not in self.__request_futures:
-            raise ProtocolError(
-                'Got response id {} but expected but request with such id was not sent.'.format(response_id)
-            )
         message_data = await self.reader.readexactly(length - 16)
 
-        ft = self.__request_futures.pop(response_id)
-        if not ft.cancelled():
-            ft.set_result(message_data)
+        if response_id not in self.__request_futures:
+            logger.warning(
+                f'Got response id {response_id} but request with such id was not sent'
+            )
+        else:
+            ft = self.__request_futures.pop(response_id)
+            if not ft.done():
+                ft.set_result(message_data)
 
     async def wait_connected(self) -> None:
         """Returns when connection is ready to be used"""
