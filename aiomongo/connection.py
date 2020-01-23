@@ -188,7 +188,8 @@ class Connection:
         try:
             return await response_future
         except asyncio.CancelledError:
-            del self.__request_futures[request_id]
+            if request_id in self.__request_futures:
+                del self.__request_futures[request_id]
             raise
 
     async def write_command(self, request_id: int, msg: bytes) -> dict:
@@ -202,7 +203,8 @@ class Connection:
         try:
             response_data = await response_future
         except asyncio.CancelledError:
-            del self.__request_futures[request_id]
+            if request_id in self.__request_futures:
+                del self.__request_futures[request_id]
             raise
 
         response = helpers._unpack_response(response_data)
@@ -282,7 +284,8 @@ class Connection:
         try:
             response = await response_future
         except asyncio.CancelledError:
-            del self.__request_futures[request_id]
+            if request_id in self.__request_futures:
+                del self.__request_futures[request_id]
             raise
 
         unpacked = helpers._unpack_response(response, codec_options=codec_options)
