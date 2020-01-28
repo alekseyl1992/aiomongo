@@ -70,7 +70,7 @@ class AioMongoClient:
 
         # primary may change in the future
         for host, pool in self._pools.items():
-            task = asyncio.ensure_future(self.check_primary_coro(host, pool), loop=self.loop)
+            task = asyncio.ensure_future(self.check_primary_coro(host, pool))
             self._check_primary_tasks.append(task)
 
     def __getitem__(self, item: str) -> Database:
@@ -93,8 +93,7 @@ class AioMongoClient:
 
         try:
             is_master = await asyncio.wait_for(connection.is_master(),
-                                               timeout=self.options.pool_options.connect_timeout,
-                                               loop=self.loop)
+                                               timeout=self.options.pool_options.connect_timeout)
 
             if is_master.is_writable:
                 if pool != self._primary_pool:

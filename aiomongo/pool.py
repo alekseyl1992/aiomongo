@@ -64,8 +64,7 @@ class Pool:
         self._index = (self._index + 1) % len(self._connections)
 
         await asyncio.wait_for(connection.wait_connected(),
-                               timeout=self.options.pool_options.connect_timeout,
-                               loop=self.loop)
+                               timeout=self.options.pool_options.connect_timeout)
 
         return connection
 

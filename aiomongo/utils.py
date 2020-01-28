@@ -24,5 +24,5 @@ class IncrementalSleeper:
         new_delay = min(self.delay * self.factor, self.max_delay)
         self.delay = random.normalvariate(new_delay, new_delay*self.jitter)
 
-        await asyncio.sleep(self.delay, loop=self.loop)
+        await asyncio.sleep(self.delay)
 

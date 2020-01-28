@@ -47,8 +47,8 @@ class Connection:
         self.options = options
         self.slave_ok = False
 
-        self.__connected = asyncio.Event(loop=loop)
-        self.__disconnected = asyncio.Event(loop=loop)
+        self.__connected = asyncio.Event()
+        self.__disconnected = asyncio.Event()
         self.__request_id = 0
         self.__request_futures = {}
         self.__sleeper = IncrementalSleeper(loop)
@@ -70,12 +70,12 @@ class Connection:
     async def connect(self) -> None:
         if self.host.startswith('/'):
             self.reader, self.writer = await asyncio.wait_for(asyncio.open_unix_connection(
-                path=self.host, loop=self.loop
-            ), timeout=self.options.pool_options.connect_timeout, loop=self.loop)
+                path=self.host
+            ), timeout=self.options.pool_options.connect_timeout)
         else:
             self.reader, self.writer = await asyncio.wait_for(asyncio.open_connection(
-                host=self.host, port=self.port, loop=self.loop
-            ), timeout=self.options.pool_options.connect_timeout, loop=self.loop)
+                host=self.host, port=self.port
+            ), timeout=self.options.pool_options.connect_timeout)
 
         sock = self.writer.transport.get_extra_info('socket')
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, int(self.options.pool_options.socket_keepalive))
@@ -85,7 +85,7 @@ class Connection:
         else:
             endpoint = '{}:{}'.format(self.host, self.port)
         logger.debug('Established connection to {}'.format(endpoint))
-        self.read_loop_task = asyncio.ensure_future(self.read_loop(), loop=self.loop)
+        self.read_loop_task = asyncio.ensure_future(self.read_loop())
         self.read_loop_task.add_done_callback(self._on_read_loop_task_done)
 
         is_master = await self.is_master(
@@ -180,7 +180,7 @@ class Connection:
             msg = operation.get_message(self.slave_ok, self.is_mongos, True)
             request_id, data, _ = self._split_message(msg)
 
-        response_future = asyncio.Future(loop=self.loop)
+        response_future = asyncio.Future()
         self.__request_futures[request_id] = response_future
 
         self.send_message(data)
@@ -195,7 +195,7 @@ class Connection:
     async def write_command(self, request_id: int, msg: bytes) -> dict:
         self._check_connected()
 
-        response_future = asyncio.Future(loop=self.loop)
+        response_future = asyncio.Future()
         self.__request_futures[request_id] = response_future
 
         self.send_message(msg)
@@ -337,7 +337,7 @@ class Connection:
                 self.__request_futures = {}
 
                 if self.reconnect_task is None:
-                    self.reconnect_task = asyncio.ensure_future(self.reconnect(), loop=self.loop)
+                    self.reconnect_task = asyncio.ensure_future(self.reconnect())
                     self.reconnect_task.add_done_callback(self._on_reconnect_task_done)
                 else:
                     logger.warning('Reconnect already in progress')
