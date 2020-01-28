@@ -10,7 +10,7 @@ from pymongo import common, helpers, message
 from pymongo.collation import Collation, validate_collation_or_none
 from pymongo.collection import ReturnDocument, _NO_OBJ_ERROR
 from pymongo.errors import ConfigurationError, InvalidName, OperationFailure
-from pymongo.operations import _WriteOp, IndexModel
+from pymongo.operations import IndexModel
 from pymongo.read_concern import ReadConcern
 from pymongo.read_preferences import ReadPreference, _ALL_READ_PREFERENCES
 from pymongo.results import (BulkWriteResult,
@@ -1553,7 +1553,7 @@ class Collection:
         """
         return BulkOperationBuilder(self, True, bypass_document_validation)
 
-    async def bulk_write(self, requests: List[_WriteOp], ordered: bool = True,
+    async def bulk_write(self, requests: List[Any], ordered: bool = True,
                          bypass_document_validation: bool = False) -> BulkWriteResult:
         """Send a batch of write operations to the server.
 
